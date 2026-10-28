@@ -1,0 +1,41 @@
+### Works with the VS Code "REST Client" extension and IntelliJ HTTP client.
+@gw = http://localhost:8080
+
+### Gateway landing page
+GET {{gw}}/
+
+### Products
+GET {{gw}}/products
+###
+GET {{gw}}/products?category=accessories
+###
+POST {{gw}}/products
+Content-Type: application/json
+
+{ "name": "Webcam", "description": "1080p", "price": 59.90, "category": "Accessories" }
+
+### Inventory
+GET {{gw}}/inventory/1
+###
+POST {{gw}}/inventory/1/reserve?quantity=2
+###
+POST {{gw}}/inventory/5/reserve?quantity=999
+
+### Recommendations (live or fallback)
+GET {{gw}}/recommendations
+###
+GET {{gw}}/recommendations/1
+
+### Chaos control
+POST {{gw}}/admin/recommendation/chaos
+Content-Type: application/json
+
+{ "mode": "LATENCY", "latencyMs": 4000 }
+###
+POST {{gw}}/admin/recommendation/chaos
+Content-Type: application/json
+
+{ "mode": "NONE" }
+
+### Live resilience state
+GET {{gw}}/resilience/status

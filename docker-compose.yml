@@ -1,0 +1,75 @@
+# One command to run the whole platform:   docker compose up --build
+#
+#   Dashboard   http://localhost:3000
+#   Gateway     http://localhost:8080
+#   Eureka      http://localhost:8761
+#   Zipkin      http://localhost:9411
+
+x-service-env: &service-env
+  EUREKA_URL: http://eureka-server:8761/eureka/
+  ZIPKIN_ENDPOINT: http://zipkin:9411/api/v2/spans
+
+x-java-service: &java-service
+  restart: unless-stopped
+  networks: [platform]
+
+services:
+  eureka-server:
+    <<: *java-service
+    build: { context: ., dockerfile: docker/Dockerfile.service, args: { MODULE: eureka-server } }
+    ports: ["8761:8761"]
+    environment:
+      EUREKA_HOSTNAME: eureka-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:8761/actuator/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  zipkin:
+    image: openzipkin/zipkin:3
+    restart: unless-stopped
+    networks: [platform]
+    ports: ["9411:9411"]
+
+  product-service:
+    <<: *java-service
+    build: { context: ., dockerfile: docker/Dockerfile.service, args: { MODULE: product-service } }
+    environment: *service-env
+    depends_on:
+      eureka-server: { condition: service_healthy }
+
+  inventory-service:
+    <<: *java-service
+    build: { context: ., dockerfile: docker/Dockerfile.service, args: { MODULE: inventory-service } }
+    environment: *service-env
+    depends_on:
+      eureka-server: { condition: service_healthy }
+
+  recommendation-service:
+    <<: *java-service
+    build: { context: ., dockerfile: docker/Dockerfile.service, args: { MODULE: recommendation-service } }
+    environment: *service-env
+    depends_on:
+      eureka-server: { condition: service_healthy }
+
+  gateway-service:
+    <<: *java-service
+    build: { context: ., dockerfile: docker/Dockerfile.service, args: { MODULE: gateway-service } }
+    ports: ["8080:8080"]
+    environment:
+      <<: *service-env
+      TRUST_FORWARDED_FOR: "true"      # the dashboard's nginx sets X-Forwarded-For
+    depends_on:
+      eureka-server: { condition: service_healthy }
+
+  dashboard:
+    restart: unless-stopped
+    networks: [platform]
+    build: { context: ., dockerfile: docker/Dockerfile.dashboard }
+    ports: ["3000:80"]
+    depends_on: [gateway-service]
+
+networks:
+  platform:

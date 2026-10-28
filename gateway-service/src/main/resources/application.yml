@@ -1,0 +1,193 @@
+# =============================================================================
+# API Gateway
+# Every value that differs between "run locally" and "run in Docker" is an
+# environment variable with a sensible local default.
+# =============================================================================
+server:
+  port: ${GATEWAY_PORT:8080}
+
+spring:
+  application:
+    name: api-gateway
+  reactor:
+    context-propagation: auto            # keeps trace IDs flowing through reactive chains
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 2000        # ms - fail fast if a backend is unreachable
+            response-timeout: 10s        # hard upper bound; the TimeLimiter (3s) trips first
+          routes:
+
+            # ------------------------------------------------------------------
+            # Product Service  /products/**
+            # Filter order = execution order: RateLimit -> Circuit Breaker
+            # ------------------------------------------------------------------
+            - id: product-service
+              uri: lb://product-service
+              predicates:
+                - Path=/products/**
+              filters:
+                - name: InMemoryRateLimit
+                  args: { capacity: 40, refillPerSecond: 20 }
+                - name: CircuitBreaker
+                  args:
+                    name: productServiceCircuitBreaker
+                    fallbackUri: forward:/fallback/product
+                    statusCodes: [500, 502, 503, 504]
+
+            # ------------------------------------------------------------------
+            # Inventory Service  /inventory/**
+            # RateLimit -> Bulkhead -> Circuit Breaker
+            # ------------------------------------------------------------------
+            - id: inventory-service
+              uri: lb://inventory-service
+              predicates:
+                - Path=/inventory/**
+              filters:
+                - name: InMemoryRateLimit
+                  args: { capacity: 40, refillPerSecond: 20 }
+                - name: Bulkhead
+                  args: { name: inventoryBulkhead }
+                - name: CircuitBreaker
+                  args:
+                    name: inventoryServiceCircuitBreaker
+                    fallbackUri: forward:/fallback/inventory
+                    statusCodes: [500, 502, 503, 504]
+
+            # ------------------------------------------------------------------
+            # Recommendation Service  /recommendations/**   (the "flaky" dependency)
+            # RateLimit -> Bulkhead -> Circuit Breaker (+ time limit) -> Retry
+            # Retry sits INSIDE the breaker, so the breaker records one outcome per
+            # client request instead of one per retry attempt.
+            # ------------------------------------------------------------------
+            - id: recommendation-service
+              uri: lb://recommendation-service
+              predicates:
+                - Path=/recommendations/**
+              filters:
+                - name: InMemoryRateLimit
+                  args: { capacity: 20, refillPerSecond: 10 }
+                - name: Bulkhead
+                  args: { name: recommendationBulkhead }
+                - name: CircuitBreaker
+                  args:
+                    name: recommendationServiceCircuitBreaker
+                    fallbackUri: forward:/fallback/recommendation
+                    statusCodes: [500, 502, 503, 504]
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY, SERVICE_UNAVAILABLE, GATEWAY_TIMEOUT
+                    backoff: { firstBackoff: 50ms, maxBackoff: 200ms, factor: 2 }
+
+            # ------------------------------------------------------------------
+            # Chaos control plane. Deliberately NOT behind the circuit breaker so
+            # the dashboard can still reset the service while the breaker is OPEN.
+            # /admin/recommendation/chaos  ->  /internal/chaos
+            # DEMO ONLY - remove (or secure) this route in a real deployment.
+            # ------------------------------------------------------------------
+            - id: recommendation-chaos-admin
+              uri: lb://recommendation-service
+              predicates:
+                - Path=/admin/recommendation/chaos/**
+              filters:
+                - RewritePath=/admin/recommendation/(?<segment>.*), /internal/$\{segment}
+
+# -----------------------------------------------------------------------------
+# Service discovery
+# -----------------------------------------------------------------------------
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+    registry-fetch-interval-seconds: 5
+  instance:
+    prefer-ip-address: true
+    lease-renewal-interval-in-seconds: 5       # demo-tuned: fast failure detection
+    lease-expiration-duration-in-seconds: 10
+
+# -----------------------------------------------------------------------------
+# Resilience4j
+# -----------------------------------------------------------------------------
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        registerHealthIndicator: true
+        allowHealthIndicatorToFail: false      # an OPEN breaker must not mark the gateway itself DOWN
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 6
+        minimumNumberOfCalls: 4
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        permittedNumberOfCallsInHalfOpenState: 3
+        automaticTransitionFromOpenToHalfOpenEnabled: true
+    instances:
+      productServiceCircuitBreaker:
+        baseConfig: default
+      inventoryServiceCircuitBreaker:
+        baseConfig: default
+      recommendationServiceCircuitBreaker:
+        baseConfig: default
+
+  timelimiter:
+    instances:
+      productServiceCircuitBreaker:
+        timeoutDuration: 3s
+      inventoryServiceCircuitBreaker:
+        timeoutDuration: 3s
+      recommendationServiceCircuitBreaker:
+        timeoutDuration: 3s
+
+  bulkhead:
+    instances:
+      inventoryBulkhead:
+        maxConcurrentCalls: 10
+        maxWaitDuration: 0ms
+      recommendationBulkhead:
+        maxConcurrentCalls: 5
+        maxWaitDuration: 0ms
+
+# -----------------------------------------------------------------------------
+# Custom platform settings
+# -----------------------------------------------------------------------------
+platform:
+  monitored-services: product-service,inventory-service,recommendation-service
+  rate-limit:
+    trust-forwarded-for: ${TRUST_FORWARDED_FOR:false}   # true only when behind a trusted proxy (e.g. the dashboard's nginx)
+
+# -----------------------------------------------------------------------------
+# Observability: metrics (Prometheus) + distributed tracing (Zipkin)
+# -----------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,circuitbreakers,circuitbreakerevents,gateway
+  endpoint:
+    health:
+      show-details: always
+  health:
+    circuitbreakers:
+      enabled: true
+  tracing:
+    enabled: ${TRACING_ENABLED:true}
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${ZIPKIN_ENDPOINT:http://localhost:9411/api/v2/spans}
+
+info:
+  app:
+    name: api-gateway
+    description: Resilient API gateway (Spring Cloud Gateway + Resilience4j)
+
+logging:
+  level:
+    com.circuitbreaker: INFO
+    org.springframework.cloud.gateway: INFO
+    io.github.resilience4j: INFO

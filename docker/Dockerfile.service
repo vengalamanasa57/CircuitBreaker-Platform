@@ -1,0 +1,27 @@
+# Generic image for every Spring Boot module. Build context = repository root.
+#   docker build -f docker/Dockerfile.service --build-arg MODULE=gateway-service -t gateway-service .
+
+# ---- build stage -----------------------------------------------------------
+FROM maven:3.9-eclipse-temurin-17 AS build
+ARG MODULE
+WORKDIR /workspace
+COPY pom.xml .
+COPY eureka-server/pom.xml eureka-server/pom.xml
+COPY gateway-service/pom.xml gateway-service/pom.xml
+COPY product-service/pom.xml product-service/pom.xml
+COPY inventory-service/pom.xml inventory-service/pom.xml
+COPY recommendation-service/pom.xml recommendation-service/pom.xml
+# Cache dependencies in their own layer (re-runs only when a pom changes)
+RUN mvn -B -q -pl ${MODULE} -am dependency:go-offline || true
+COPY ${MODULE}/src ${MODULE}/src
+RUN mvn -B -q -pl ${MODULE} -am -DskipTests package \
+    && cp ${MODULE}/target/${MODULE}-*.jar /workspace/app.jar
+
+# ---- runtime stage ---------------------------------------------------------
+FROM eclipse-temurin:17-jre-alpine
+RUN addgroup -S app && adduser -S app -G app
+WORKDIR /app
+COPY --from=build /workspace/app.jar app.jar
+USER app
+ENV JAVA_OPTS="-XX:MaxRAMPercentage=75 -XX:+UseG1GC"
+ENTRYPOINT ["sh", "-c", "exec java $JAVA_OPTS -jar app.jar"]
